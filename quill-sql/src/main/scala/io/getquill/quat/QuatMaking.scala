@@ -53,15 +53,29 @@ object QuatMaking {
 
   type QuotesTypeRepr = Quotes#reflectModule#TypeRepr
 
-  // Object-level caches using getOrElseUpdate. Keys are QuotesTypeRepr which may not hash consistently
-  // across macro invocations, but provide best-effort deduplication within a single compilation unit.
-  private val encodeableCache: mutable.Map[QuotesTypeRepr, Boolean] = mutable.Map()
-  def lookupIsEncodeable(tpe: QuotesTypeRepr)(computeEncodeable: () => Boolean) =
-    encodeableCache.getOrElseUpdate(tpe, computeEncodeable())
+  // Caches must be scoped to a single macro expansion: TypeRepr equality/hashing is
+  // only defined within its own Quotes instance, and this object is shared across the
+  // compiler's parallel threads. A global TypeRepr-keyed map can return a DIFFERENT
+  // type's cached result (observed: a Product row type resolved to another type's
+  // quat, collapsing the generated SQL projection and decoding rows positionally
+  // against the wrong columns) and is also a data race. Scope the maps per Quotes
+  // (weak keys: dropped when the expansion's Quotes is collected) and synchronize
+  // the outer lookup.
+  private val encodeableCaches = new java.util.WeakHashMap[Quotes, mutable.Map[QuotesTypeRepr, Boolean]]()
+  def lookupIsEncodeable(tpe: QuotesTypeRepr)(computeEncodeable: () => Boolean)(using q: Quotes): Boolean = {
+    val cache = encodeableCaches.synchronized {
+      encodeableCaches.computeIfAbsent(q, _ => mutable.Map())
+    }
+    cache.getOrElseUpdate(tpe, computeEncodeable())
+  }
 
-  private val quatCache: mutable.Map[QuotesTypeRepr, Quat] = mutable.Map()
-  def lookupCache(tpe: QuotesTypeRepr)(computeQuat: () => Quat) =
-    quatCache.getOrElseUpdate(tpe, computeQuat())
+  private val quatCaches = new java.util.WeakHashMap[Quotes, mutable.Map[QuotesTypeRepr, Quat]]()
+  def lookupCache(tpe: QuotesTypeRepr)(computeQuat: () => Quat)(using q: Quotes): Quat = {
+    val cache = quatCaches.synchronized {
+      quatCaches.computeIfAbsent(q, _ => mutable.Map())
+    }
+    cache.getOrElseUpdate(tpe, computeQuat())
+  }
 
   enum AnyValBehavior {
     case TreatAsValue
